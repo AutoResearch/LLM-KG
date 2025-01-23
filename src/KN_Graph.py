@@ -1,4 +1,3 @@
-import pandas as pd
 from langchain.graphs.networkx_graph import NetworkxEntityGraph
 import networkx as nx
 from graph_plt import plot_graph
@@ -7,7 +6,7 @@ from langchain.graphs.networkx_graph import KnowledgeTriple
 import neonx
 import json
 import pandas as pd
-# class to create knowledge graph and add triples
+
 
 class Graph:
     def __init__(self):
@@ -15,13 +14,6 @@ class Graph:
     def triple_add(self,source_node,target_node, edge_relation):
         triple = KnowledgeTriple(source_node, edge_relation, target_node)
         self.graph.add_triple(triple)
-    def csv_add_triple(self,path):
-        triple_df=pd.read_csv(path)
-        for index, row in triple_df.iterrows():
-            source_node = row["source_node"]
-            edge_relation = row["edge_relation"]
-            target_node = row["target_node"]
-            self.triple_add(source_node, target_node, edge_relation)
     def get_neo4j_graph(self):
         nx_graph = nx.DiGraph()  # Add nodes and edges
 
@@ -38,6 +30,15 @@ class Graph:
 
         data = neonx.get_geoff(nx_graph, "LINKS_TO")
         return data
+    def csv_add_triple(self,path):
+        triple_df=pd.read_csv(path)
+        triple_df.dropna(inplace=True)
+        for index, row in triple_df.iterrows():
+            source_node = row["source_node"]
+            edge_relation = row["edge_relation"]
+            target_node = row["target_node"]
+            triple = KnowledgeTriple(source_node, edge_relation, target_node)
+            self.graph.add_triple(triple)
 
     def plot(self):
         nx_graph = nx.DiGraph()  # Add nodes and edges
