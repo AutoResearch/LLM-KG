@@ -1,22 +1,15 @@
-# `pipeline.py`:
-
-# - coordinates everything
-# - Balances exploration vs refinement
-# - Keeps track of the best models found
-# - Manages a pool of promising models
-
-
-
 # pipeline.py
 
 import asyncio
 from src.core import ModelState, generate_test_data
+from src.llm_client import UnifiedLLMClient  
 from src.mcts_kg import EnhancedMCTS, MCTSNode
 from src.graph_workflow import ModelDiscoveryGraph, AgentState
 from src.evaluation import SimpleEvaluator
 from src.llm import EnhancedLLMInterface
-from src.knowledge_graph import CognitiveKnowledgeGraph
+from src.enhanced_knowledge_graph import EnhancedKnowledgeGraph, MechanismInfo
 from src.transformations import ThoughtTransformations
+from src.config import Config
 import numpy as np
 from typing import Optional, Tuple, List, Dict
 import json
@@ -24,7 +17,13 @@ from datetime import datetime
 import logging
 import signal
 import sys
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
+load_dotenv()
+
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -37,18 +36,42 @@ logger = logging.getLogger(__name__)
 
 class EnhancedModelDiscoveryPipeline:
     def __init__(self, 
-                 use_mock_llm: bool = True,
-                 n_iterations: int = 50,
-                 exploration_constant: float = 1.414):
+                model_name: str = "claude-3-opus-20240229",
+                use_mock_llm: bool = False,  #
+                n_iterations: int = 50,
+                exploration_constant: float = 1.414,
+                use_csv: bool = True,
+                knowledge_path: str = None):
         """Initialize the enhanced pipeline with both MCTS and workflow components"""
         logger.info("Initializing Enhanced Model Discovery Pipeline...")
+    
+        # Validate model configuration
+        try:
+            self.config = Config(model_name)
+        except ValueError as e:
+            logger.error(f"Model configuration error: {e}")
+            raise
         
-        # Initialize core components
+        # Initialize core components with enhanced knowledge graph
         self.test_data = generate_test_data(n_trials=100)
-        self.kg = CognitiveKnowledgeGraph()
+        
+        # Initialize knowledge graph based on CSV availability
+        if use_csv and knowledge_path and Path(knowledge_path).exists():
+            logger.info(f"Initializing knowledge graph from {knowledge_path}")
+            self.kg = EnhancedKnowledgeGraph(load_initial=True)
+            self.kg.load_from_csv(knowledge_path)
+        else:
+            logger.info("Using mock knowledge graph")
+            self.kg = EnhancedKnowledgeGraph(load_initial=True)
+            self._initialize_mock_knowledge()
+        
+        # Initialize additional mechanisms
+        self._initialize_custom_mechanisms()
+        
+        self.llm = UnifiedLLMClient(model_name=model_name)  
         self.mcts = EnhancedMCTS(self.kg, exploration_constant)
         self.evaluator = SimpleEvaluator(self.test_data)
-        self.llm = EnhancedLLMInterface(use_mock=use_mock_llm)
+        self.transformations = ThoughtTransformations(self.llm)  
         self.graph_workflow = ModelDiscoveryGraph(self.kg, test_data=self.test_data)
         
         self.n_iterations = n_iterations
@@ -79,6 +102,78 @@ class EnhancedModelDiscoveryPipeline:
         # State tracking
         self.is_running = True
         
+        logger.info(f"Pipeline initialized with model: {model_name}")
+
+    def _initialize_mock_knowledge(self):
+        """Initialize mock knowledge graph with basic mechanisms"""
+        basic_mechanisms = [
+            MechanismInfo(
+                name="basic_rl",
+                description="Basic reinforcement learning",
+                base_equations=["Q(t+1) = Q(t) + alpha * (R(t) - Q(t))"],
+                parameters={"alpha": {"typical_range": [0.1, 0.5]}},
+                requirements=[],
+                related_mechanisms=[],
+                constraints=[]
+            ),
+            MechanismInfo(
+                name="simple_memory",
+                description="Simple memory mechanism",
+                base_equations=["Q(t+1) = gamma * Q(t) + (1-gamma) * R(t)"],
+                parameters={"gamma": {"typical_range": [0.1, 0.9]}},
+                requirements=[],
+                related_mechanisms=[],
+                constraints=[]
+            )
+        ]
+        
+        for mech in basic_mechanisms:
+            self.kg.add_mechanism(mech)
+            logger.info(f"Added mock mechanism: {mech.name}")
+
+    def _initialize_custom_mechanisms(self):
+        """Initialize custom cognitive mechanisms in the knowledge graph"""
+        mechanisms = [
+            MechanismInfo(
+                name="td_learning",
+                description="Temporal difference learning mechanism",
+                base_equations=["Q(t+1) = Q(t) + α(R(t) + γQ(t+1) - Q(t))"],
+                parameters={
+                    "alpha": {"typical_range": [0.1, 0.5]},
+                    "gamma": {"typical_range": [0.8, 0.99]}
+                },
+                requirements=["needs_learning_rate", "needs_discount"],
+                related_mechanisms=["reinforcement_learning", "prediction_error"],
+                constraints=["learning_rate_bounded", "discount_bounded"]
+            ),
+            MechanismInfo(
+                name="exploration_bonus",
+                description="Exploration bonus mechanism",
+                base_equations=["Q(t+1) = Q(t) + α(R(t) - Q(t)) + β/sqrt(N(t))"],
+                parameters={
+                    "beta": {"typical_range": [0.1, 2.0]}
+                },
+                requirements=["needs_visit_counts"],
+                related_mechanisms=["reinforcement_learning"],
+                constraints=["positive_beta"]
+            ),
+            MechanismInfo(
+                name="adaptive_learning",
+                description="Adaptive learning rate mechanism",
+                base_equations=["α(t) = α₀/sqrt(t)", "Q(t+1) = Q(t) + α(t)(R(t) - Q(t))"],
+                parameters={
+                    "alpha_0": {"typical_range": [0.5, 2.0]}
+                },
+                requirements=["needs_time_tracking"],
+                related_mechanisms=["reinforcement_learning"],
+                constraints=["positive_alpha"]
+            )
+        ]
+        
+        for mech in mechanisms:
+            self.kg.add_mechanism(mech)
+            logger.info(f"Added mechanism: {mech.name}")
+
     def setup_signal_handlers(self):
         """Set up handlers for graceful shutdown"""
         def handle_interrupt(signum, frame):
@@ -201,8 +296,9 @@ class EnhancedModelDiscoveryPipeline:
             if len(self.thought_pool) > self.max_thought_pool_size:
                 # Keep best thoughts based on both score and diversity
                 self.thought_pool.sort(
-                    key=lambda x: (x.score if x.score is not None else float('-inf')) +
-                                self._compute_diversity_bonus(x),
+                    key=lambda x: (
+                        x.score if x.score is not None else float('-inf')
+                    ) + self._compute_diversity_bonus(x),
                     reverse=True
                 )
                 self.thought_pool = self.thought_pool[:self.max_thought_pool_size]
@@ -243,36 +339,56 @@ class EnhancedModelDiscoveryPipeline:
         except Exception:
             return 0.0
 
-    async def _update_knowledge_graph(self, state: ModelState):
-        """Update knowledge graph with new model information"""
-        try:
-            if state.score is not None:
-                # Extract mechanisms
-                mechanisms = self._extract_mechanisms(state)
-                
-                for mechanism in mechanisms:
-                    self.kg.add_model_knowledge(mechanism, state)
-                    self.metrics['kg_updates'].append(mechanism)
-                    self.metrics['successful_mechanisms'].add(mechanism)
-                    
-                logger.debug(f"Updated KG with model for mechanisms: {mechanisms}")
-                
-        except Exception as e:
-            logger.error(f"Error updating knowledge graph: {str(e)}")
-
     def _extract_mechanisms(self, state: ModelState) -> List[str]:
         """Extract cognitive mechanisms from model state"""
         mechanisms = []
         equation = state.equations[0].lower()
         
-        if "q(t)" in equation:
-            mechanisms.append("reinforcement_learning")
-        if "wm(t)" in equation:
-            mechanisms.append("working_memory")
-        if "pe" in equation or "r(t)-q(t)" in equation:
-            mechanisms.append("prediction_error")
+        # Enhanced mechanism detection patterns
+        mechanism_patterns = {
+            "reinforcement_learning": ["q(t)", "r(t)", "alpha", "learning"],
+            "working_memory": ["wm(t)", "memory", "gamma", "decay"],
+            "prediction_error": ["pe", "r(t)-q(t)", "error", "delta"],
+            "td_learning": ["q(t+1)", "gamma", "discount"],
+            "exploration_bonus": ["beta", "sqrt", "n(t)", "count"],
+            "adaptive_learning": ["alpha(t)", "alpha_0", "sqrt(t)"],
+            "basic_rl": ["q(t)", "alpha", "r(t)"],
+            "simple_memory": ["gamma", "memory"]
+        }
+        
+        for mechanism, patterns in mechanism_patterns.items():
+            if any(pattern in equation for pattern in patterns):
+                mechanisms.append(mechanism)
         
         return mechanisms
+
+    async def _update_knowledge_graph(self, state: ModelState):
+        """Update knowledge graph with new model information"""
+        try:
+            if state.score is not None:
+                # Extract mechanisms with enhanced detection
+                mechanisms = self._extract_mechanisms(state)
+                
+                for mechanism in mechanisms:
+                    # Add model knowledge to graph
+                    self.kg.add_model_knowledge(mechanism, state)
+                    
+                    # Update metrics
+                    self.metrics['kg_updates'].append(mechanism)
+                    self.metrics['successful_mechanisms'].add(mechanism)
+                    
+                    # Log performance statistics
+                    perf_stats = self.kg.get_mechanism_performance(mechanism)
+                    if perf_stats:
+                        logger.debug(f"Mechanism {mechanism} stats: {perf_stats}")
+                    
+                logger.debug(f"Updated KG with model for mechanisms: {mechanisms}")
+                # Export graph data periodically
+                if len(self.metrics['kg_updates']) % 50 == 0:
+                    self._export_graph_data()
+                
+        except Exception as e:
+            logger.error(f"Error updating knowledge graph: {str(e)}")
 
     def _compute_enhanced_score(self, base_score: float, got_metrics: dict) -> float:
         """Compute enhanced score incorporating various metrics"""
@@ -363,7 +479,7 @@ class EnhancedModelDiscoveryPipeline:
                 'settings': {
                     'n_iterations': self.n_iterations,
                     'exploration_constant': self.mcts.exploration_constant,
-                    'use_mock_llm': self.llm.use_mock
+                    'model_name': self.config.model_name
                 },
                 'successful_mechanisms': list(self.metrics['successful_mechanisms'])
             }
@@ -390,7 +506,7 @@ class EnhancedModelDiscoveryPipeline:
                     'thought_latencies': self.metrics['thought_latencies'],
                     'aggregation_counts': self.metrics['aggregation_counts'],
                     'refinement_counts': self.metrics['refinement_counts'],
-                    'kg_updates': self.metrics['kg_updates'][-50:],  # Last 50 KG updates
+                    'kg_updates': self.metrics['kg_updates'][-50:],
                     'successful_mechanisms': list(self.metrics['successful_mechanisms']),
                     'evaluation_times': self.metrics['evaluation_times'],
                     'summary_stats': {
@@ -407,31 +523,49 @@ class EnhancedModelDiscoveryPipeline:
         except Exception as e:
             logger.error(f"Error saving metrics: {str(e)}")
 
+    def _export_graph_data(self):
+        """Export graph data for visualization"""
+        try:
+            # Export Neo4j compatible data
+            neo4j_data = self.kg.export_to_neo4j()
+            if neo4j_data:
+                filename = f"graph_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                with open(filename, 'w') as f:
+                    f.write(neo4j_data)
+                logger.info(f"Exported graph data to {filename}")
+                
+        except Exception as e:
+            logger.error(f"Error exporting graph data: {str(e)}")
+
 async def main():
     """Main entry point with enhanced error handling"""
     try:
-        # Initialize pipeline with configuration
+        # Check for knowledge CSV file
+        default_knowledge_path = "knowledge.csv"
+        use_csv = Path(default_knowledge_path).exists()
+        
+        # Init pipeline with configuration
         pipeline = EnhancedModelDiscoveryPipeline(
-            use_mock_llm=False,  # Use real LLM
+            model_name="claude-3-opus-20240229",  # Specify the model explicitly
+            use_mock_llm=False,  # Changed to False to use real LLM
             n_iterations=50,
-            exploration_constant=1.414
+            exploration_constant=1.414,
+            use_csv=use_csv,
+            knowledge_path=default_knowledge_path if use_csv else None
         )
         
-        # Setup signal handlers for graceful shutdown
         pipeline.setup_signal_handlers()
         
-        # Run the pipeline
         await pipeline.run()
         
     except KeyboardInterrupt:
-        logger.info("\nGracefully shutting down...")
+        logger.info("\nShutting down...")
         if hasattr(pipeline, 'save_results'):
             pipeline.save_results()
     except Exception as e:
         logger.error(f"Error in main: {str(e)}")
         raise
     finally:
-        # Ensure final cleanup
         try:
             if hasattr(pipeline, '_save_metrics'):
                 pipeline._save_metrics()
