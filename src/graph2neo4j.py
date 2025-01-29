@@ -1,6 +1,6 @@
 from neo4j import GraphDatabase
 import pyneoinstance
-
+#
 config_path='neo4j_config.yaml'
 
 class Neo4jKnowledgeGraph:
