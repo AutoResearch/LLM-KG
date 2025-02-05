@@ -2,7 +2,7 @@ from neo4j import GraphDatabase
 import pyneoinstance
 # Need a Yaml file for configs of Local neo4j DB
 config_path='neo4j_config.yaml'
-
+ #
 class Neo4jKnowledgeGraph:
     def __init__(self, config_path=config_path):
         self.configs = pyneoinstance.load_yaml_file(config_path)
